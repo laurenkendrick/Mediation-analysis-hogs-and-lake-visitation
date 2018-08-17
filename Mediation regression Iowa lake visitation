@@ -1,0 +1,351 @@
+#Lauren Kendrick
+#June 2018
+#Regression to show that hog production has a causal effect on lake visitation in Iowa via hog production's impacts on lake water quality.
+#This effect is demonstrated through causal mediation analysis.
+#############################################33
+setwd('C:/Users/kendrick/Documents/Dissertation Workshop/Data')
+library(plm)
+library(stargazer)
+library(lmtest)
+library(car)
+library(caret)
+library(MASS)
+library(mediation)
+# clustered SEs, clustered on "group"... could also cluster on "time" 
+  # compute Stata-like degrees of freedom adjustment for number of groups
+  # See http://www.richard-bluhm.com/clustered-ses-in-r-and-stata-2/
+  
+  clse = function(reg) { 
+    # index(reg, "id") returns the id or entity variable vector 
+    G = length(unique(index(reg,"id")))
+    N = length(index(reg,"id"))
+#    dfa = (G/(G - 1))   # note Bluhm multiplies this by finite-sample df adjustment
+    dfa = (G/(G - 1))*(N-1)/reg$df.residual   # note Bluhm multiplies this by finite-sample df adjustment
+    rob = sqrt(diag(dfa*vcovHC(reg, method="arellano", type = "HC1", 
+                               cluster = "group")))
+    return(rob)
+  }
+library(bda)
+
+############
+#Import data
+###########
+#Household lake visitation data for 130 lakes in Iowa from surveys in 2003, 2004, 2005, 2009, and 2014  https://www.card.iastate.edu/lakes/
+#Data on number of small, medium, and large hog farms in each Iowa county and number of hogs in each county #Iowa DNR AFO Database reports https://programs.iowadnr.gov/animalfeedingoperations/Reports.aspx Basic AFO Data
+#
+#Example calculation for the number of hogs in neighboring counties, based on county level reports from Iowa DNR
+#This step was executed before this script, but part of the section is included here to demonstrate how nearest neighbor county hog counts were generated.
+library(spdep)
+library(sp)
+counties<-unionSpatialPolygons(Townships,Townships$CO_NAME)
+summary(counties)
+plot(counties)
+#row.names(Townships)<-as.character(Townships$CO_NAME)
+nb<-poly2nb(counties)
+mat<-nb2mat(nb,style="B")
+colnames(mat)<-rownames(mat)
+Full$NNcounties2003<-mat%*%Countylevelhogdata$TotalSwine2003
+#
+#Lake water quality data obtained from http://limnology.eeob.iastate.edu/lakereport/ and Iowa's Section 303(d) Impaired Waters listings http://www.iowadnr.gov/Environmental-Protection/Water-Quality/Water-Monitoring/Impaired-Waters
+setwd('C:/Users/kendrick/Documents/Dissertation Workshop/Data')
+Full<-read.csv("complete_data_all_WQ_vars.csv",header=TRUE)
+Full<-Full[Full$Lake!="Lake Anita",]
+
+#############################
+#Imputation of missing lake water quality observations
+############################
+##Linear regression used for imputation because of high correlation of water quality variables within the dataset
+##
+#First Si, because it doesn't depend strongly on any of the others
+##
+regtrendSi<-plm(Si~factor(Year)+factor(Impairment)+Lake_Depth+Total_P+Secchi_depth+Chlorophyll+Temp+Phytoplankton+Taxon_Richness_Zoo+Large_susp_feeders+Zooplank+Cyano+Taxon_Richness_Phyto+Trophic_TP+Trophic_Chl+Trophic_S+Vol_solids+Inorg_solids+Org_carbon+NO3_NO2+Alk_CaCO3+pH+TN_TP_ratio+Total_N+SRP_P+Turbidity+Conductivity+Dissolved_O+Pop,data=Full,index=c("Lake","Year"),model="within",effect="individual")
+summary(regtrendSi) #Predicted strongly by Year, Secchi_Depth, Temp, Taxon_richness_Zoo, Taxon_richness_Phyto, Trophic_TP, Trophic_S,Inorg solids,SRP_P, Turbidity, Conductivity  
+fittrendSi<-lm(Si~factor(Lake)+factor(Impairment)+Lake_Depth+Total_P+Secchi_depth+Chlorophyll+Temp+Phytoplankton+Taxon_Richness_Zoo+Large_susp_feeders+Zooplank+Cyano+Taxon_Richness_Phyto+Trophic_TP+Trophic_Chl+Trophic_S+Vol_solids+Inorg_solids+Org_carbon+Alk_CaCO3+pH+SRP_P+Turbidity+Conductivity+Dissolved_O+Pop,data=Full)
+summary(fittrendSi) 
+Full$Siimput<-predict(fittrendSi,Full)
+Full$Si[Full$Year==2009]<-Full$Siimput[Full$Year==2009]
+Full$Si[Full$Year==2014]<-Full$Siimput[Full$Year==2014]
+Full$Siimput<-NULL
+##
+#Second NO3_NO2, because it's the only one left missing for 2009
+#What do the trends of NO3_NO2, Total_N, Si, and TN_TP_ratio look like?
+regtrendN32<-plm(NO3_NO2~factor(Impairment)+Lake_Depth+Total_P+Secchi_depth+Chlorophyll+Temp+Phytoplankton+Taxon_Richness_Zoo+Large_susp_feeders+Zooplank+Cyano+Taxon_Richness_Phyto+Trophic_TP+Trophic_Chl+Trophic_S+Vol_solids+Inorg_solids+Org_carbon+Si+Alk_CaCO3+pH+TN_TP_ratio+Total_N+SRP_P+Turbidity+Conductivity+Dissolved_O+Pop,data=Full,index=c("Lake","Year"),model="within",effect="twoway")#Missing from 2009
+summary(regtrendN32) #Predicted strongly by Total_P, Zooplank, Inorg_solids, Total_N, SRP_P, Conductivity, and Pop
+fittrendN32<-lm(NO3_NO2~factor(Lake)+factor(Impairment)+Lake_Depth+Total_P+Secchi_depth+Chlorophyll+Temp+Phytoplankton+Taxon_Richness_Zoo+Large_susp_feeders+Zooplank+Cyano+Taxon_Richness_Phyto+Trophic_TP+Trophic_Chl+Trophic_S+Vol_solids+Inorg_solids+Org_carbon+Si+Alk_CaCO3+pH+TN_TP_ratio+Total_N+SRP_P+Turbidity+Conductivity+Dissolved_O+Pop,data=Full)
+summary(fittrendN32)
+Full$N32<-predict(fittrendN32,Full)
+Full$NO3_NO2[Full$Year==2009]<-Full$N32[Full$Year==2009]
+Full$N32<-NULL
+##
+#Third Total_N because TN_TP ratio depends on it and not the other way around
+##
+regtrendTN<-plm(Total_N~factor(Year)+factor(Impairment)+Lake_Depth+Total_P+Secchi_depth+Chlorophyll+Temp+Phytoplankton+Taxon_Richness_Zoo+Large_susp_feeders+Zooplank+Cyano+Taxon_Richness_Phyto+Trophic_TP+Trophic_Chl+Trophic_S+Vol_solids+Inorg_solids+Org_carbon+Si+Alk_CaCO3+pH+TN_TP_ratio+NO3_NO2+SRP_P+Turbidity+Conductivity+Dissolved_O+Pop,data=Full,index=c("Lake","Year"),model="within",effect="individual")
+summary(regtrendTN) #Predicted strongly by Year=2003, impairment=4, Zooplank, Trophic_TP,pH, TN_TP_ratio,NO3_NO2,SRP_P,Conductivity,Dissolved_O,and Pop 
+fittrendTN<-lm(Total_N~factor(Lake)+factor(Impairment)+Lake_Depth+Total_P+Secchi_depth+Chlorophyll+Temp+Phytoplankton+Taxon_Richness_Zoo+Large_susp_feeders+Zooplank+Cyano+Taxon_Richness_Phyto+Trophic_TP+Trophic_Chl+Trophic_S+Vol_solids+Inorg_solids+Org_carbon+Si+Alk_CaCO3+pH+NO3_NO2+SRP_P+Turbidity+Conductivity+Dissolved_O+Pop,data=Full)
+summary(fittrendTN)
+Full$TN<-predict(fittrendTN,Full)
+Full$Total_N[Full$Year==2014]<-Full$TN[Full$Year==2014]
+Full$TN<-NULL
+##
+#Finally TN_TP
+##
+regtrendTNP<-plm(TN_TP_ratio~factor(Impairment)+Lake_Depth+Total_P+Secchi_depth+Chlorophyll+Temp+Phytoplankton+Taxon_Richness_Zoo+Large_susp_feeders+Zooplank+Cyano+Taxon_Richness_Phyto+Trophic_TP+Trophic_Chl+Trophic_S+Vol_solids+Inorg_solids+Org_carbon+Si+Alk_CaCO3+pH+NO3_NO2+Total_N+SRP_P+Turbidity+Conductivity+Dissolved_O+Pop,data=Full,index=c("Lake","Year"),model="within",effect="twoway")
+summary(regtrendTNP) #Predicted strongly by Total_P, Temp, Large susp feeders, Trophic_TP,Org carbon, Total_N,Dissolved_O  
+fittrendTNP<-lm(TN_TP_ratio~factor(Lake)+factor(Impairment)+Lake_Depth+Total_P+Secchi_depth+Chlorophyll+Temp+Phytoplankton+Taxon_Richness_Zoo+Large_susp_feeders+Zooplank+Cyano+Taxon_Richness_Phyto+Trophic_TP+Trophic_Chl+Trophic_S+Vol_solids+Inorg_solids+Org_carbon+Si+Alk_CaCO3+pH+NO3_NO2+Total_N+SRP_P+Turbidity+Conductivity+Dissolved_O+Pop,data=Full)
+summary(fittrendTNP)
+Full$TNP<-predict(fittrendTNP,Full)
+Full$TN_TP_ratio[Full$Year==2014]<-Full$TNP[Full$Year==2014]
+Full$TNP<-NULL
+Fullnona<-na.omit(Full)
+
+#####################3
+#Principal component analysis (Center, scalem and reduce dimensionality of lake water quality variables)
+#########################
+#Originally 28 water quality variables
+#Need to correct for skewness, then center and scale before PCA
+require(caret)
+
+Fullnona$Si[Fullnona$Si<=0]<-0
+Fullnona$Total_N[Fullnona$Total_N<=0]<-0
+Fullnona$TN_TP_ratio[Fullnona$TN_TP_ratio<=0]<-0
+Fullnona$NO3_NO2[Fullnona$NO3_NO2<=0]<-0
+
+trans <- preProcess(Fullnona[,c(5:31,33)], method=c("YeoJohnson","center", "scale", "pca"))
+PCA<-predict(trans, Fullnona[,c(5:31,33)])
+#box cox transformations
+head(trans)
+#retained 18 PCs explaining 95% of variance (default thresholds to preProcess)
+head(PCA)
+#4 PCs explain 50% of variance
+#5 PCs explain 60% of variance
+#7 PCs explain 70% of variance
+#10 PCs explain 80% of variance
+#Loadings
+trans$rotation
+FullnonaPCA<-cbind(Fullnona,PCA)
+
+#Water Quality PCs classified according to theme of strongly weighted water quality variables in each component, as follows:
+#PC1 Water clarity
+#PC2 Eutrophication
+#PC3 Fish health
+#PC4 Contamination and large suspended feeders
+#PC5 Lake depth
+#PC6 Taxonomic richness of plankton
+#PC7 Phosphorus
+#PC8 Contamination and lack of large suspended feeders
+#PC9 Impairment status and lack of water clarity
+#PC10 Contamination and lack of impairment
+#We disregard variables past first ten because they capture little of the variation in water quality dataset
+#We decide to keep PC1, PC2, PC3, and PC6 because these variables are linked to the effects of ammonia or nitrogen from hog production 
+#################################
+#Center, scale, and reduce dimensionality of hog variables
+##################################
+#Originally four hog variables: # hog farms with fewer than 500 animal units, between 500 and 1000, and more than 1000, and # hogs in neighboring counties
+transhog <- preProcess(FullnonaPCA[,c(42:45)], method=c("YeoJohnson","center", "scale", "pca"))
+PCAhog<-predict(transhog, FullnonaPCA[,c(42:45)])
+transhog$rotation
+colnames(PCAhog)<-c("hogPC1","hogPC2","hogPC3")
+FullnonaPCAhogPCA<-cbind(FullnonaPCA,PCAhog)
+FullnonaPCAhogPCA$Popc<-scale(FullnonaPCAhogPCA$Pop,center=TRUE,scale=TRUE)
+#3 PCs explain 95% of the variance in hog production by county
+#hogPC1 Hog production intensity
+#hogPC2 Prevalence of small hog farms
+#hogpc3 Ratio of large hog farms in county to hog production intensity in neighboring counties
+###########################################
+#Model of lake visitation
+###########################################
+regfull<-plm(HHvisits~PC1 + PC2 + PC3 + PC6 + 
+    Popc + hogPC1 + hogPC2 + hogPC3 
+,data=FullnonaPCAhogPCA,index=c("Lake","Year"),model="within",effect="twoways")
+stargazer(regfull,se=list(clse(regfull)),title="Panel regressions, clustered SEs",type="text",column.labels=c("Lake-Yr FE"),df=FALSE,digits=4)
+coeftest(regfull,vcov=vcovHC(regfull,method="arellano",cluster="group"))
+#Low R-squared
+#We wonder if first-order interactions are important to this complex system
+
+regfull<-plm(HHvisits~PC1 + PC2 + PC3 + PC6 + 
+    Popc + hogPC1 + hogPC2 + hogPC3 + hogPC1*PC1+hogPC2*PC1+hogPC3*PC1+
+hogPC1*PC2+hogPC2*PC2+hogPC3*PC2+
+hogPC1*PC3+hogPC2*PC3+hogPC3*PC3+
+hogPC1*PC6+hogPC2*PC6+hogPC3*PC6+
+PC1*Popc+PC2*Popc+PC3*Popc+PC6*Popc+
+hogPC1*Popc+hogPC2*Popc+hogPC3*Popc
+,data=FullnonaPCAhogPCA,index=c("Lake","Year"),model="within",effect="twoways")
+stargazer(regfull,se=list(clse(regfull)),title="Panel regressions, clustered SEs",type="text",column.labels=c("Lake-Yr FE"),df=FALSE,digits=4)
+coeftest(regfull,vcov=vcovHC(regfull,method="arellano",cluster="group"))
+#First order interactions are significant
+vif(regfull) #Shows population variable has collinearity
+
+regnopop<-plm(HHvisits~PC1 + PC2 + PC3 + PC6 + 
+    hogPC1 + hogPC2 + hogPC3 + hogPC1*PC1+hogPC2*PC1+hogPC3*PC1+
+hogPC1*PC2+hogPC2*PC2+hogPC3*PC2+
+hogPC1*PC3+hogPC2*PC3+hogPC3*PC3+
+hogPC1*PC6+hogPC2*PC6+hogPC3*PC6
+,data=FullnonaPCAhogPCA,index=c("Lake","Year"),model="within",effect="twoways")
+stargazer(regnopop,se=list(clse(regnopop)),title="Panel regressions, clustered SEs",type="text",column.labels=c("Lake-Yr FE"),df=FALSE,digits=4)
+coeftest(regnopop,vcov=vcovHC(regnopop,method="arellano",cluster="group"))
+#regnopop performs much worse, so we keep Popc terms in model, but note that standard errors may be inflated
+
+#Now we're ready to start checking for a causal relationship between hog production and lake visitation through the effect of hog production on lake water quality.
+#This would be a mediating relationship, where water quality mediates the effect of hog production on lake visitation.
+#If there is a mediating relationship, it suggests that county hog production affects expected lake visitation.
+#############################################
+#Mediation step 1: Check if hog variables predict lake visitation
+#############################################
+#Limited model
+regmod1<-plm(HHvisits~Popc+hogPC1+hogPC2+hogPC3+hogPC1*Popc+hogPC2*Popc+hogPC3*Popc,data=FullnonaPCAhogPCA,index=c("Lake","Year"),model="within",effect="twoways")
+stargazer(regmod1,se=list(clse(regmod1)),title="Panel regressions, clustered SEs",type="text",column.labels=c("Lake-Yr FE"),df=FALSE,digits=4)
+coeftest(regmod1,vcov=vcovHC(regmod1,method="arellano",cluster="group"))
+
+###############################################
+#Mediation step 2: Check if hog variables predict water quality variables
+###############################################
+fixedWQ1<-lm(PC1~factor(Lake)+factor(Year)+PC2+PC3+PC6+
+Popc+hogPC1+hogPC2+hogPC3+
+hogPC1*PC2+hogPC2*PC2+hogPC3*PC2+
+hogPC1*PC3+hogPC2*PC3+hogPC3*PC3+
+hogPC1*PC6+hogPC2*PC6+hogPC3*PC6+
+PC2*Popc+PC3*Popc+PC6*Popc+
+hogPC1*Popc+hogPC2*Popc+hogPC3*Popc
+,data=FullnonaPCAhogPCA)
+
+fixedWQ2<-lm(PC2~factor(Lake)+factor(Year)+PC1+PC3+PC6+
+Popc+hogPC1+hogPC2+hogPC3+
+hogPC1*PC1+hogPC2*PC1+hogPC3*PC1+
+hogPC1*PC3+hogPC2*PC3+hogPC3*PC3+
+hogPC1*PC6+hogPC2*PC6+hogPC3*PC6+
+PC1*Popc+PC3*Popc+PC6*Popc+
+hogPC1*Popc+hogPC2*Popc+hogPC3*Popc
+,data=FullnonaPCAhogPCA)
+
+fixedWQ3<-lm(PC3~factor(Lake)+factor(Year)+PC1+PC2+PC6+
+Popc+hogPC1+hogPC2+hogPC3+
+hogPC1*PC1+hogPC2*PC1+hogPC3*PC1+
+hogPC1*PC2+hogPC2*PC2+hogPC3*PC2+
+hogPC1*PC6+hogPC2*PC6+hogPC3*PC6+
+PC1*Popc+PC2*Popc+PC6*Popc+
+hogPC1*Popc+hogPC2*Popc+hogPC3*Popc
+,data=FullnonaPCAhogPCA)
+
+fixedWQ6<-lm(PC6~factor(Lake)+factor(Year)+PC1+PC2+PC3+
+Popc+hogPC1+hogPC2+hogPC3+
+hogPC1*PC1+hogPC2*PC1+hogPC3*PC1+
+hogPC1*PC2+hogPC2*PC2+hogPC3*PC2+
+hogPC1*PC3+hogPC2*PC3+hogPC3*PC3+
+PC1*Popc+PC2*Popc+PC3*Popc+
+hogPC1*Popc+hogPC2*Popc+hogPC3*Popc
+,data=FullnonaPCAhogPCA)
+
+#################################################
+#Mediation step 3: Check if water quality variables predict lake visitation when hog variables are present in regression
+#################################################
+#Full model
+regmod2<-plm(HHvisits~PC1+PC2+PC3+PC6+
+Popc+hogPC1+hogPC2+hogPC3+
+hogPC1*PC1+hogPC2*PC1+hogPC3*PC1+
+hogPC1*PC2+hogPC2*PC2+hogPC3*PC2+
+hogPC1*PC3+hogPC2*PC3+hogPC3*PC3+
+hogPC1*PC6+hogPC2*PC6+hogPC3*PC6+
+PC1*Popc+PC2*Popc+PC3*Popc+PC6*Popc+
+hogPC1*Popc+hogPC2*Popc+hogPC3*Popc
+,data=FullnonaPCAhogPCA,index=c("Lake","Year"),model="within",effect="twoways")
+stargazer(regmod2,se=list(clse(regmod2)),title="Panel regressions, clustered SEs",type="text",column.labels=c("Lake-Yr FE"),df=FALSE,digits=4)
+coeftest(regmod2,vcov=vcovHC(regmod2,method="arellano",cluster="group"))
+
+fixedregmod2<-lm(HHvisits~factor(Lake)+factor(Year)+PC1+PC2+PC3+PC6+
+Popc+hogPC1+hogPC2+hogPC3+
+hogPC1*PC1+hogPC2*PC1+hogPC3*PC1+
+hogPC1*PC2+hogPC2*PC2+hogPC3*PC2+
+hogPC1*PC3+hogPC2*PC3+hogPC3*PC3+
+hogPC1*PC6+hogPC2*PC6+hogPC3*PC6+
+PC1*Popc+PC2*Popc+PC3*Popc+PC6*Popc+
+hogPC1*Popc+hogPC2*Popc+hogPC3*Popc
+,data=FullnonaPCAhogPCA)
+
+##############
+#Mediation step 4: When water quality variables are absent, check that the hog variables predict more of the variation in lake visits
+###############
+#If causal effect of a hog variable on lake visitation is mediated by a water quality variable, excluding the water quality variable from the overall regression will increase the magnitude of the coefficient of the hog variable
+####################
+regmodminus1<-plm(HHvisits~PC2+PC3+PC6+
+Popc+hogPC1+hogPC2+hogPC3+
+hogPC1*PC2+hogPC2*PC2+hogPC3*PC2+
+hogPC1*PC3+hogPC2*PC3+hogPC3*PC3+
+hogPC1*PC6+hogPC2*PC6+hogPC3*PC6+
+PC2*Popc+PC3*Popc+PC6*Popc+
+hogPC1*Popc+hogPC2*Popc+hogPC3*Popc
+,data=FullnonaPCAhogPCA,index=c("Lake","Year"),model="within",effect="twoways")
+stargazer(regmodminus1,se=list(clse(regmodminus1)),title="Panel regressions, clustered SEs",type="text",column.labels=c("Lake-Yr FE"),df=FALSE,digits=4)
+coeftest(regmodminus1,vcov=vcovHC(regmodminus1,method="arellano",cluster="group"))
+
+regmodminus2<-plm(HHvisits~PC1+PC3+PC6+
+Popc+hogPC1+hogPC2+hogPC3+
+hogPC1*PC1+hogPC2*PC1+hogPC3*PC1+
+hogPC1*PC3+hogPC2*PC3+hogPC3*PC3+
+hogPC1*PC6+hogPC2*PC6+hogPC3*PC6+
+PC1*Popc+PC3*Popc+PC6*Popc+
+hogPC1*Popc+hogPC2*Popc+hogPC3*Popc
+,data=FullnonaPCAhogPCA,index=c("Lake","Year"),model="within",effect="twoways")
+stargazer(regmodminus2,se=list(clse(regmodminus2)),title="Panel regressions, clustered SEs",type="text",column.labels=c("Lake-Yr FE"),df=FALSE,digits=4)
+coeftest(regmodminus2,vcov=vcovHC(regmodminus2,method="arellano",cluster="group"))
+
+regmodminus3<-plm(HHvisits~PC1+PC2+PC6+
+Popc+hogPC1+hogPC2+hogPC3+
+hogPC1*PC1+hogPC2*PC1+hogPC3*PC1+
+hogPC1*PC2+hogPC2*PC2+hogPC3*PC2+
+hogPC1*PC6+hogPC2*PC6+hogPC3*PC6+
+PC1*Popc+PC2*Popc+PC6*Popc+
+hogPC1*Popc+hogPC2*Popc+hogPC3*Popc
+,data=FullnonaPCAhogPCA,index=c("Lake","Year"),model="within",effect="twoways")
+stargazer(regmodminus3,se=list(clse(regmodminus3)),title="Panel regressions, clustered SEs",type="text",column.labels=c("Lake-Yr FE"),df=FALSE,digits=4)
+coeftest(regmodminus3,vcov=vcovHC(regmodminus3,method="arellano",cluster="group"))
+
+regmodminus6<-plm(HHvisits~PC1+PC2+PC3+
+Popc+hogPC1+hogPC2+hogPC3+
+hogPC1*PC1+hogPC2*PC1+hogPC3*PC1+
+hogPC1*PC2+hogPC2*PC2+hogPC3*PC2+
+hogPC1*PC3+hogPC2*PC3+hogPC3*PC3+
+PC1*Popc+PC2*Popc+PC3*Popc+
+hogPC1*Popc+hogPC2*Popc+hogPC3*Popc
+,data=FullnonaPCAhogPCA,index=c("Lake","Year"),model="within",effect="twoways")
+stargazer(regmodminus6,se=list(clse(regmodminus6)),title="Panel regressions, clustered SEs",type="text",column.labels=c("Lake-Yr FE"),df=FALSE,digits=4)
+coeftest(regmodminus6,vcov=vcovHC(regmodminus6,method="arellano",cluster="group"))
+
+################
+#Verifying mediation with R library (mediation)
+################
+contcont11<-mediate(fixedWQ1,fixedregmod2, sims=100, treat="hogPC1",mediator="PC1")
+summary(contcont11) #NS
+contcont21<-mediate(fixedWQ1,fixedregmod2, sims=100, treat="hogPC2",mediator="PC1")
+summary(contcont21) #NS
+contcont31<-mediate(fixedWQ1,fixedregmod2, sims=100, treat="hogPC3",mediator="PC1")
+summary(contcont31) #NS  #fixedfitted S ADE,Total 
+plot(contcont31)
+
+contcont12<-mediate(fixedWQ2,fixedregmod2, sims=100, treat="hogPC1",mediator="PC2")
+summary(contcont12) #NS
+contcont22<-mediate(fixedWQ2,fixedregmod2, sims=100, treat="hogPC2",mediator="PC2")
+summary(contcont22) #NS
+contcont32<-mediate(fixedWQ2,fixedregmod2, sims=1000, treat="hogPC3",mediator="PC2")
+summary(contcont32) #S ADE, Total
+plot(contcont32)
+
+contcont13<-mediate(fixedWQ3,fixedregmod2, sims=1000, treat="hogPC1",mediator="PC3")
+summary(contcont13) #S ACME
+plot(contcont13)
+contcont23<-mediate(fixedWQ3,fixedregmod2, sims=100, treat="hogPC2",mediator="PC3")
+summary(contcont23) #NS
+plot(contcont23)
+contcont33<-mediate(fixedWQ3,fixedregmod2, sims=1000, treat="hogPC3",mediator="PC3")
+summary(contcont33) #S ACME, ADE, total
+plot(contcont33)
+
+contcont16<-mediate(fixedWQ6,fixedregmod2, sims=100, treat="hogPC1",mediator="PC6")
+summary(contcont16) #NS
+contcont26<-mediate(fixedWQ6,fixedregmod2, sims=100, treat="hogPC2",mediator="PC6")
+summary(contcont26) #S ADE  #fixedfitted NS
+contcont36<-mediate(fixedWQ6,fixedregmod2, sims=1000, treat="hogPC3",mediator="PC6")
+summary(contcont36) #S ADE, total
+plot(contcont36)
+
+#We conclude that the first and third principal components of hog production have a causal effect on expected lake visitation because of their impact on fish health, PC3.
+#Large hog farms may have less of an negative impact per hog on lake visitation, and mid-size hog farms may have more negative impact per hog on average.
